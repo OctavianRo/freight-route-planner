@@ -18,6 +18,7 @@ export function csv(input) {
   }
   return rows;
 }
+export const KILCULLEN = [53.130278,-6.744444];
 export function location(raw, country, areas) {
   const code = raw.toUpperCase().replace(/\s+/g,'');
   const pattern = country === 'IE' ? /^([A-Z][0-9][0-9W])[A-Z0-9]{4}$/ : /^([A-Z]{1,2}\d[A-Z\d]?)\d[A-Z]{2}$/;
@@ -48,50 +49,44 @@ export function readOrders(input,country,areas) {
     return {id:get('order_id') || 'Row '+(i+2),postcode,date,kg,weight:get('weight_t'),pt,day:time/86400000,issue:errors.join('. ')};
   });
 }
-function km(a,b) {
-  const rad = Math.PI/180;
-  const h = Math.sin((b[0]-a[0])*rad/2)**2 + Math.cos(a[0]*rad)*Math.cos(b[0]*rad)*Math.sin((b[1]-a[1])*rad/2)**2;
-  return 12742*Math.asin(Math.sqrt(Math.min(1,h)));
-}
-function sequence(stops,depot) {
-  const points=[depot,...stops.map(s=>s.pt),depot];
-  // Reverse segments when doing so shortens the round trip (bounded 2-opt).
-  for(let pass=0;pass<8;pass++){
-    let changed=false;
-    for(let i=1;i<points.length-2;i++) for(let j=i+1;j<points.length-1;j++){
-      const [a,b,c,d]=[points[i-1],points[i],points[j],points[j+1]];
-      if(km(a,c)+km(b,d)+0.001>=km(a,b)+km(c,d)) continue;
-      points.splice(i,j-i+1,...points.slice(i,j+1).reverse());
-      stops.splice(i-1,j-i+1,...stops.slice(i-1,j).reverse());
-      changed=true;
-    }
-    if(!changed) break;
-  }
-  return points.slice(1).reduce((sum,p,i)=>sum+km(points[i],p),0);
-}
-export function plan(orders,limit,depot,priority){
+export function plan(orders,limit,depot,priority,maxKm,distance){
   if(!Number.isSafeInteger(limit)||limit<=0||!depot) throw Error('Check the payload and depot.');
-  const pending=[], exceptions=[],loads=[];
+  if(!Number.isFinite(maxKm)||maxKm<=0) throw Error('Enter a positive trip distance limit.');
+  const pending=[], exceptions=[], loads=[];
   for(const o of orders){
-    if(o.issue || o.kg>limit) exceptions.push({...o,issue:o.issue || 'Exceeds payload limit'});
+    let reason=o.issue;
+    if(!reason && o.kg>limit) reason='Exceeds payload limit';
+    if(!reason){
+      const solo=distance(depot,o.pt)+distance(o.pt,depot);
+      if(!Number.isFinite(solo)) reason='No complete road route to and from the depot';
+      else if(solo>maxKm) reason='Depot round trip is '+solo.toFixed(1)+' km (limit '+maxKm+' km)';
+    }
+    if(reason) exceptions.push({...o,issue:reason});
     else pending.push(o);
   }
   pending.sort((a,b)=>a.day-b.day);
   while(pending.length){
-    const stops=[pending.shift()];
-    let kg=stops[0].kg;
+    const first=pending.shift(), stops=[first];
+    let kg=first.kg, total=distance(depot,first.pt)+distance(first.pt,depot);
     while(true){
-      let best=-1,score=Infinity;
-      for(let i=0;i<pending.length;i++){
-        const o=pending[i];
+      let best;
+      for(const [index,o] of pending.entries()){
         if(o.kg+kg>limit) continue;
-        const cost=km(stops.at(-1).pt,o.pt)+(o.day-stops[0].day)*priority;
-        if(cost<score){best=i;score=cost;}
+        for(let slot=0;slot<=stops.length;slot++){
+          const before=stops[slot-1]?.pt ?? depot, after=stops[slot]?.pt ?? depot;
+          const added=distance(before,o.pt)+distance(o.pt,after)-distance(before,after);
+          const nextTotal=total+added;
+          if(!Number.isFinite(nextTotal)||nextTotal>maxKm) continue;
+          const score=added+(o.day-first.day)*priority;
+          if(!best || score<best.score) best={index,slot,nextTotal,score};
+        }
       }
-      if(best<0) break;
-      const [next]=pending.splice(best,1); stops.push(next); kg+=next.kg;
+      if(!best) break;
+      const [next]=pending.splice(best.index,1);
+      stops.splice(best.slot,0,next);kg+=next.kg;total=best.nextTotal;
     }
-    loads.push({stops,kg,km:sequence(stops,depot)});
+    const legs=stops.map((o,i)=>distance(stops[i-1]?.pt ?? depot,o.pt));
+    loads.push({stops,kg,km:total,legs,depotKm:stops.map(o=>distance(depot,o.pt)),returnKm:distance(stops.at(-1).pt,depot)});
   }
-  return {loads,exceptions};
+  return {loads,exceptions,maxKm};
 }
