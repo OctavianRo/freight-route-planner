@@ -6,7 +6,7 @@ let areas, manifest='', activePlan, revision=0;
 const empty=el('result').firstElementChild.cloneNode(true);
 function clear(){
   controller?.abort();
-  activePlan=null; el('export').hidden=true; el('result').replaceChildren(empty.cloneNode(true));
+  activePlan=null; el('exports').hidden=true; el('result').replaceChildren(empty.cloneNode(true));
   el('message').textContent=''; el('generate').disabled=!manifest || !areas;
 }
 async function load(read,name,example=false){
@@ -15,13 +15,22 @@ async function load(read,name,example=false){
   try{
     const source=await read();
     if(ticket!==revision) return;
-    if(!source.trim()) throw Error('The manifest is empty.');
+    if(typeof source==='string' ? !source.trim() : !source.rows.length) throw Error('The manifest is empty.');
     if(example){el('region').value='IE';el('depot').value='Kilcullen';}
     manifest=source;el('filename').textContent=name;clear();
     el('message').textContent='Manifest ready. Check your dispatch settings.';
-  }catch(e){if(ticket===revision){el('filename').textContent='Choose a CSV file';el('message').textContent=e.message;}}
+  }catch(e){if(ticket===revision){el('filename').textContent='Choose an Excel or CSV file';el('message').textContent=e.message;}}
 }
-function file(f){if(f) load(()=>f.text(),f.name);}
+function file(f){
+  if(!f)return;
+  load(async()=>{
+    if(/\.xlsx$/i.test(f.name)){
+      const {workbookManifest}=await import('./workbook.mjs');
+      return workbookManifest(await f.arrayBuffer());
+    }
+    return f.text();
+  },f.name);
+}
 el('file').onchange=e=>file(e.target.files[0]);
 el('drop').ondragover=e=>{e.preventDefault();el('drop').classList.add('over');};
 el('drop').ondragleave=()=>el('drop').classList.remove('over');
@@ -51,7 +60,7 @@ function render({loads,exceptions,maxKm}){
     const section=node('section','');section.className='trip';section.append(node('h3','Orders to review'));
     table(section,['Order','Destination','Tonnes','Reason'],exceptions.map(o=>[o.id,o.postcode,o.weight,o.issue]));root.append(section);
   }
-  el('export').hidden=false;
+  el('exports').hidden=false;
 }
 el('settings').onsubmit=async e=>{
   e.preventDefault();clear();
@@ -70,12 +79,23 @@ el('settings').onsubmit=async e=>{
   }catch(err){if(!signal.aborted)el('message').textContent='Could not generate plan. '+err.message;}
   finally{if(!signal.aborted)el('generate').disabled=false;}
 };
-el('export').onclick=()=>{
+function planRows(){
   if(!activePlan)return;
   const rows=[['trip','sequence','depot','order_id','postcode','order_date','weight_t','issue','leg_km','return_to_depot_km','trip_km','trip_limit_km','direct_from_depot_km']];
   const add=(o,t,s,leg="",back="",total="",direct="")=>rows.push([t,s,el('depot').value,o.id,o.postcode,o.date,o.weight,o.issue,leg,back,total,activePlan.maxKm,direct]);
   activePlan.loads.forEach((l,i)=>l.stops.forEach((o,j)=>add(o,i+1,j+1,l.legs[j].toFixed(3),j===l.stops.length-1?l.returnKm.toFixed(3):"",l.km.toFixed(3),l.depotKm[j].toFixed(3))));
   activePlan.exceptions.forEach(o=>add(o,'',''));
+  return rows;
+}
+el('excel').onclick=async()=>{
+  if(!activePlan)return;
+  const rows=planRows();
+  try{const {downloadPlan}=await import('./workbook.mjs');downloadPlan(rows);}
+  catch(err){el('message').textContent='Could not export workbook. '+err.message;}
+};
+el('export').onclick=()=>{
+  if(!activePlan)return;
+  const rows=planRows();
   function field(v){const raw=String(v);const safe=/^[=+@\-\t\r]/.test(raw)?"'"+raw:raw;return '"'+safe.replaceAll('"','""')+'"';}
   const url=URL.createObjectURL(new Blob([rows.map(r=>r.map(field).join(',')).join('\r\n')],{type:'text/csv;charset=utf-8'}));
   const a=node('a','');a.href=url;a.download='load-plan.csv';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);

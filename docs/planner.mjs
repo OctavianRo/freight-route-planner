@@ -1,3 +1,5 @@
+import {orderDate} from './dates.mjs';
+import {optimise} from './optimise.mjs';
 export function csv(input) {
   const rows = [];
   let row = [], value = '', quoted = false, closed = false;
@@ -30,7 +32,7 @@ export function kilograms(value) {
   return /^\d+(\.\d{1,3})?$/.test(String(value)) && Number.isSafeInteger(kg) && kg > 0 ? kg : 0;
 }
 export function readOrders(input,country,areas) {
-  const [header = [], ...rows] = csv(input);
+  const [header = [], ...rows] = typeof input==='string' ? csv(input) : input.rows;
   const cols = header.map(x=>x.toLowerCase());
   for (const key of ['postcode','weight_t','order_date'])
     if (!cols.includes(key)) throw Error('Missing column '+key+'. Use the CSV template.');
@@ -44,9 +46,9 @@ export function readOrders(input,country,areas) {
     if (row.length !== cols.length) errors.push('Wrong number of fields');
     if (!pt) errors.push('Unknown postcode or area');
     if (!kg) errors.push('Enter positive tonnes with up to 3 decimals');
-    const time = Date.parse(date+'T00:00:00Z');
-    if (!/^\d{4}-\d\d-\d\d$/.test(date) || !Number.isFinite(time) || new Date(time).toISOString().slice(0,10)!==date) errors.push('Use a valid YYYY-MM-DD date');
-    return {id:get('order_id') || 'Row '+(i+2),postcode,date,kg,weight:get('weight_t'),pt,day:time/86400000,issue:errors.join('. ')};
+    const parsed=orderDate(date,input.date1904);
+    if (!parsed) errors.push('Use a valid DD/MM/YYYY order date');
+    return {id:get('order_id') || 'Row '+(i+2),postcode,date:parsed?.display ?? date,kg,weight:get('weight_t'),pt,day:parsed?.day,issue:errors.join('. ')};
   });
 }
 export function plan(orders,limit,depot,priority,maxKm,distance){
@@ -64,27 +66,7 @@ export function plan(orders,limit,depot,priority,maxKm,distance){
     if(reason) exceptions.push({...o,issue:reason});
     else pending.push(o);
   }
-  pending.sort((a,b)=>a.day-b.day);
-  while(pending.length){
-    const first=pending.shift(), stops=[first];
-    let kg=first.kg, total=distance(depot,first.pt)+distance(first.pt,depot);
-    while(true){
-      let best;
-      for(const [index,o] of pending.entries()){
-        if(o.kg+kg>limit) continue;
-        for(let slot=0;slot<=stops.length;slot++){
-          const before=stops[slot-1]?.pt ?? depot, after=stops[slot]?.pt ?? depot;
-          const added=distance(before,o.pt)+distance(o.pt,after)-distance(before,after);
-          const nextTotal=total+added;
-          if(!Number.isFinite(nextTotal)||nextTotal>maxKm) continue;
-          const score=added+(o.day-first.day)*priority;
-          if(!best || score<best.score) best={index,slot,nextTotal,score};
-        }
-      }
-      if(!best) break;
-      const [next]=pending.splice(best.index,1);
-      stops.splice(best.slot,0,next);kg+=next.kg;total=best.nextTotal;
-    }
+  for(const {stops,kg,km:total} of optimise(pending,{limit,depot,priority,maxKm,distance})){
     const legs=stops.map((o,i)=>distance(stops[i-1]?.pt ?? depot,o.pt));
     loads.push({stops,kg,km:total,legs,depotKm:stops.map(o=>distance(depot,o.pt)),returnKm:distance(stops.at(-1).pt,depot)});
   }
